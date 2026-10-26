@@ -1,0 +1,312 @@
+/* ========================================================
+   imgAud_vid - Cinematic Video Generator
+   Converts Static Image + Audio into High-End Ken Burns Video
+   Hardware Accelerated with NVIDIA NVENC & BoseLang
+   ======================================================== */
+
+fix cfg = load("config.bose")
+
+/* 1. Helper: Audio Duration via ffprobe */
+block get_audio_duration(path) {
+    cmd = "ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \"" + path + "\""
+    raw = run(cmd).trim()
+    when len(raw) == 0 or raw == "N/A" {
+        cmd_fallback = "ffprobe -v error -select_streams a:0 -show_entries stream=duration -of default=noprint_wrappers=1:nokey=1 \"" + path + "\""
+        raw = run(cmd_fallback).trim()
+    }
+    when len(raw) == 0 {
+        give 0.0
+    }
+    give point(raw)
+}
+
+/* 2. Helper: Camera Random State with Jump-Cut Prevention */
+block random_state(previous, z_min, z_max, p_min, p_max) {
+    state = [
+        math.random(z_min, z_max),
+        math.random(p_min, p_max),
+        math.random(p_min, p_max)
+    ]
+    when previous == Null {
+        give state
+    }
+    attempts = 0
+    loop attempts < 50 {
+        state = [
+            math.random(z_min, z_max),
+            math.random(p_min, p_max),
+            math.random(p_min, p_max)
+        ]
+        dz = math.abs(state[1] - previous[1])
+        dx = math.abs(state[2] - previous[2])
+        dy = math.abs(state[3] - previous[3])
+        when dz > 0.03 or (dx + dy) > 0.25 {
+            give state
+        }
+        attempts += 1
+    }
+    give state
+}
+
+/* 3. Helper: Generate Continuous Camera Motion Timeline */
+block generate_timeline(duration, fps, min_sec, max_sec, z_min, z_max, p_min, p_max) {
+    total_frames = int(math.round(duration * point(fps)))
+    min_frames = min_sec * fps
+    max_frames = max_sec * fps
+
+    timeline = []
+    frame = 0
+    current = random_state(Null, z_min, z_max, p_min, p_max)
+
+    loop frame < total_frames {
+        len_frames = math.random(min_frames, max_frames)
+        when (total_frames - (frame + len_frames)) < (4 * fps) {
+            len_frames = total_frames - frame
+        }
+        end_frame = math.min(frame + len_frames, total_frames)
+        target = random_state(current, z_min, z_max, p_min, p_max)
+
+        seg = {
+            "start": frame,
+            "end": end_frame,
+            "from": current,
+            "to": target
+        }
+        timeline.add(seg)
+        frame = end_frame
+        current = target
+    }
+    give timeline
+}
+
+/* 4. Helper: Construct Segment Filtergraph with Smoothstep Easing */
+block segment_filter(seg, is_first, is_last, width, height, fps, vignette, grain, grain_val, fade_in_s, fade_out_s) {
+    n = seg["end"] - seg["start"]
+    from_st = seg["from"]
+    to_st = seg["to"]
+
+    z0 = from_st[1]
+    x0 = from_st[2]
+    y0 = from_st[3]
+
+    z1 = to_st[1]
+    x1 = to_st[2]
+    y1 = to_st[3]
+
+    denom = n - 1
+    when denom < 1 { denom = 1 }
+
+    t = "(on/" + text(denom) + ")"
+    ease = "(" + t + "*" + t + "*(3-2*" + t + "))"
+
+    z0_s = text(math.round(z0, 5))
+    z_diff = text(math.round(z1 - z0, 5))
+    zoom = z0_s + "+(" + z_diff + ")*" + ease
+
+    x0_s = text(math.round(x0, 5))
+    x_diff = text(math.round(x1 - x0, 5))
+    px = x0_s + "+(" + x_diff + ")*" + ease
+
+    y0_s = text(math.round(y0, 5))
+    y_diff = text(math.round(y1 - y0, 5))
+    py = y0_s + "+(" + y_diff + ")*" + ease
+
+    zp = "zoompan=z='" + zoom + "':x='(iw-iw/zoom)*(" + px + ")':y='(ih-ih/zoom)*(" + py + ")':d=" + text(n) + ":s=" + text(width) + "x" + text(height) + ":fps=" + text(fps)
+
+    filters = [zp]
+
+    when grain and grain_val > 0 {
+        filters.add("noise=alls=" + text(grain_val) + ":allf=t")
+    }
+
+    when vignette {
+        filters.add("vignette=angle=PI/5")
+    }
+
+    fade_in_f = int(math.round(fade_in_s * point(fps)))
+    fade_out_f = int(math.round(fade_out_s * point(fps)))
+
+    when is_first and fade_in_f > 0 and n > fade_in_f {
+        filters.add("fade=t=in:s=0:n=" + text(fade_in_f))
+    }
+
+    when is_last and fade_out_f > 0 and n > fade_out_f {
+        out_start = n - fade_out_f
+        filters.add("fade=t=out:s=" + text(out_start) + ":n=" + text(fade_out_f))
+    }
+
+    filters.add("format=yuv420p")
+    filters.add("setsar=1")
+
+    give filters.join(",")
+}
+
+/* ========================================================
+   MAIN EXECUTION PIPELINE
+   ======================================================== */
+
+out("╔══════════════════════════════════════════════════════════════╗")
+out("║  ⚡ imgAud_vid - Cinematic Video Generator                   ║")
+out("║  Hardware Engine: NVIDIA NVENC Accelerated                   ║")
+out("╚══════════════════════════════════════════════════════════════╝")
+
+/* Read CLI overrides if provided */
+cli = args()
+img_path = cfg.IMAGE_PATH
+aud_path = cfg.AUDIO_PATH
+out_path = cfg.OUTPUT_PATH
+
+when len(cli) >= 1 { img_path = cli[1] }
+when len(cli) >= 2 { aud_path = cli[2] }
+when len(cli) >= 3 { out_path = cli[3] }
+
+/* Smart path resolution for both root and local execution */
+when not exist(img_path) and exist("imgAud_vid/" + img_path) {
+    img_path = "imgAud_vid/" + img_path
+}
+when not exist(aud_path) and exist("imgAud_vid/" + aud_path) {
+    aud_path = "imgAud_vid/" + aud_path
+}
+
+/* Verify files exist */
+when not exist(img_path) {
+    out("❌ Error: Image file not found at:", img_path)
+    give
+}
+when not exist(aud_path) {
+    out("❌ Error: Audio file not found at:", aud_path)
+    give
+}
+
+out("📷 Source Image:", img_path)
+out("🎵 Source Audio:", aud_path)
+
+/* Get Audio Duration */
+out("⏳ Probing audio duration...")
+duration = get_audio_duration(aud_path)
+when duration <= 0.0 {
+    out("❌ Error: Unable to read valid audio duration from:", aud_path)
+    give
+}
+out("⏱️ Audio Duration:", text(math.round(duration, 2)) + "s")
+
+/* Generate Timeline */
+timeline = generate_timeline(duration, cfg.FPS, cfg.MIN_SEGMENT_SECONDS, cfg.MAX_SEGMENT_SECONDS, cfg.ZOOM_MIN, cfg.ZOOM_MAX, cfg.PAN_MIN, cfg.PAN_MAX)
+total_segs = len(timeline)
+out("🎬 Camera Moves (Segments):", total_segs)
+
+/* Setup Directories */
+temp_dir = "temp"
+when exist("imgAud_vid") {
+    temp_dir = "imgAud_vid/temp"
+    when not out_path.starts("imgAud_vid") and not out_path.find(":") {
+        out_path = "imgAud_vid/" + out_path
+    }
+}
+run("if not exist \"" + temp_dir + "\" mkdir \"" + temp_dir + "\"")
+
+/* Ensure output directory exists */
+out_dir = "output"
+when exist("imgAud_vid") {
+    out_dir = "imgAud_vid/output"
+}
+run("if not exist \"" + out_dir + "\" mkdir \"" + out_dir + "\"")
+
+/* Prepare 3x Super-Resolution Base Image to Eliminate Subpixel Jitter */
+base_img = temp_dir + "/base.png"
+out("🔍 Preparing anti-jitter super-resolution base image (" + text(cfg.BASE_WIDTH) + "x" + text(cfg.BASE_HEIGHT) + ")...")
+base_cmd = "ffmpeg -hide_banner -loglevel error -y -i \"" + img_path + "\" -vf \"scale=" + text(cfg.BASE_WIDTH) + ":" + text(cfg.BASE_HEIGHT) + ":force_original_aspect_ratio=increase:flags=lanczos,crop=" + text(cfg.BASE_WIDTH) + ":" + text(cfg.BASE_HEIGHT) + "\" -frames:v 1 \"" + base_img + "\""
+run(base_cmd)
+
+/* Encoder Configuration: GPU NVENC vs CPU */
+enc_flags = ""
+when cfg.USE_GPU {
+    enc_flags = "-c:v " + cfg.GPU_ENCODER + " -preset " + cfg.GPU_PRESET + " -pix_fmt yuv420p"
+    out("⚡ Hardware Acceleration: NVIDIA NVENC enabled (" + cfg.GPU_ENCODER + " preset=" + cfg.GPU_PRESET + ")")
+} otherwise {
+    enc_flags = "-c:v " + cfg.CPU_ENCODER + " -preset " + cfg.CPU_PRESET + " -crf " + text(cfg.VIDEO_CRF) + " -pix_fmt yuv420p"
+    out("🖥️ Encoder: CPU Software (" + cfg.CPU_ENCODER + " preset=" + cfg.CPU_PRESET + " crf=" + text(cfg.VIDEO_CRF) + ")")
+}
+
+/* Measure Execution Time */
+start_time = clock()
+
+/* Prepare Concat List */
+concat_lines = []
+loop i from 1..total_segs {
+    concat_lines.add("file 'seg_" + text(i) + ".mp4'")
+}
+
+workers = cfg.CONCURRENT_WORKERS
+when workers < 1 { workers = 1 }
+
+total_batches = int(math.ceil(point(total_segs) / point(workers)))
+out("⚡ Parallel Multi-Worker Engine: " + text(workers) + " Concurrent Threads across " + text(total_batches) + " Batches")
+
+batch_start = 1
+batch_idx = 1
+
+loop batch_start <= total_segs {
+    batch_end = math.min(batch_start + workers - 1, total_segs)
+    out("[Batch " + text(batch_idx) + "/" + text(total_batches) + "] Rendering Segments " + text(batch_start) + " to " + text(batch_end) + " in Parallel...")
+
+    ps_lines = []
+
+    loop i from batch_start..batch_end {
+        seg = timeline[i]
+        is_first = (i == 1)
+        is_last = (i == total_segs)
+        n_frames = seg["end"] - seg["start"]
+        seg_file = temp_dir + "/seg_" + text(i) + ".mp4"
+
+        vf_str = segment_filter(seg, is_first, is_last, cfg.WIDTH, cfg.HEIGHT, cfg.FPS, cfg.ENABLE_VIGNETTE, cfg.ENABLE_GRAIN, cfg.GRAIN_STRENGTH, cfg.FADE_IN_SECONDS, cfg.FADE_OUT_SECONDS)
+
+        arg_str = "-hide_banner -loglevel error -y -i " + base_img + " -vf \"" + vf_str + "\" -frames:v " + text(n_frames) + " " + enc_flags + " -r " + text(cfg.FPS) + " -an " + seg_file
+        arg_escaped = arg_str.replace("'", "''")
+
+        p_var = "$p" + text(i)
+        ps_lines.add(p_var + " = Start-Process ffmpeg -ArgumentList '" + arg_escaped + "' -PassThru -NoNewWindow")
+    }
+
+    loop i from batch_start..batch_end {
+        p_var = "$p" + text(i)
+        ps_lines.add(p_var + ".WaitForExit()")
+    }
+
+    batch_script = temp_dir + "/batch_" + text(batch_idx) + ".ps1"
+    file.write(batch_script, ps_lines.join("\n"))
+    run("powershell -NoProfile -ExecutionPolicy Bypass -File \"" + batch_script + "\"")
+
+    batch_start += workers
+    batch_idx += 1
+}
+
+/* Write Concat List */
+concat_txt = temp_dir + "/list.txt"
+file.write(concat_txt, concat_lines.join("\n"))
+
+/* Final Concatenation and Audio Mux */
+out("🔗 Joining segments and mixing cinematic audio...")
+audio_fade = ""
+when cfg.FADE_OUT_SECONDS > 0.0 and duration > cfg.FADE_OUT_SECONDS {
+    fade_start = duration - cfg.FADE_OUT_SECONDS
+    audio_fade = " -af afade=t=out:st=" + text(math.round(fade_start, 3)) + ":d=" + text(cfg.FADE_OUT_SECONDS) + " "
+}
+
+final_cmd = "ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i \"" + concat_txt + "\" -i \"" + aud_path + "\" -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k" + audio_fade + " -t " + text(duration) + " -movflags +faststart \"" + out_path + "\""
+run(final_cmd)
+
+/* Clean up Temporary Files */
+out("🧹 Cleaning up temporary workspace files...")
+run("Remove-Item -Path \"" + temp_dir + "\" -Recurse -Force -ErrorAction SilentlyContinue")
+
+elapsed = math.round(clock() - start_time, 1)
+
+out("")
+out("════════════════════════════════════════════════════════════════")
+out("✨ SUCCESS! Turbo Cinematic video rendered successfully!")
+out("📁 Output Video:", out_path)
+out("📐 Resolution  :", text(cfg.WIDTH) + "x" + text(cfg.HEIGHT) + " @ " + text(cfg.FPS) + " fps")
+out("⏱️ Duration    :", text(math.round(duration, 2)) + " seconds")
+out("⚡ Render Time :", text(elapsed) + " seconds (Speed: " + text(math.round(duration / elapsed, 1)) + "x realtime)")
+out("════════════════════════════════════════════════════════════════")

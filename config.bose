@@ -1,0 +1,51 @@
+/* ========================================================
+   imgAud_vid - Configuration Settings
+   Image + Audio = Cinematic Video Engine (Turbo Edition)
+   ======================================================== */
+
+/* 1. File Paths (Can be overridden via command-line arguments) */
+fix IMAGE_PATH = "sample/sample_image.png"
+fix AUDIO_PATH = "sample/sample_audio.mp3"
+fix OUTPUT_PATH = "output/cinematic_video.mp4"
+
+/* 2. Video Dimensions & Framerate */
+fix WIDTH = 1920
+fix HEIGHT = 1080
+fix FPS = 30
+
+/* 3. High-Speed Parallel Processing */
+/* Number of segments to render simultaneously in parallel (2, 4, or 6 recommended) */
+fix CONCURRENT_WORKERS = 4
+
+/* 4. GPU Hardware Acceleration (NVIDIA NVENC) */
+/* Set USE_GPU = true for blazing fast hardware rendering */
+fix USE_GPU = true
+fix GPU_ENCODER = "h264_nvenc"
+fix GPU_PRESET = "p2"          /* NVENC preset: p1/p2 (fastest), p4 (medium), p7 (slowest/best) */
+fix CPU_ENCODER = "libx264"
+fix CPU_PRESET = "fast"
+fix VIDEO_CRF = 18
+
+/* 5. Camera Motion Limits */
+/* Zoom range: 1.0 = no zoom, higher = deeper zoom */
+fix ZOOM_MIN = 1.03
+fix ZOOM_MAX = 1.14
+
+/* Pan range: 0.0 = edge, 1.0 = opposite edge (safe range: 0.15 - 0.85) */
+fix PAN_MIN = 0.15
+fix PAN_MAX = 0.85
+
+/* Duration of each continuous camera move in seconds */
+fix MIN_SEGMENT_SECONDS = 10
+fix MAX_SEGMENT_SECONDS = 20
+
+/* 6. Cinematic Visual Effects */
+fix ENABLE_VIGNETTE = true      /* Subtle darkened edges */
+fix ENABLE_GRAIN = false        /* Film grain (Set false for 3x faster render; set true for vintage 35mm look) */
+fix GRAIN_STRENGTH = 5          /* Subtle grain (0-20) */
+fix FADE_IN_SECONDS = 2.0       /* Video start fade-in duration */
+fix FADE_OUT_SECONDS = 3.0      /* Video & audio ending fade-out duration */
+
+/* 7. Anti-Jitter Super-Resolution Canvas (4K UHD 3840x2160 - 55% faster than 5K with zero jitter) */
+fix BASE_WIDTH = 3840
+fix BASE_HEIGHT = 2160
