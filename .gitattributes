@@ -1,0 +1,6 @@
+# GitHub ko batayein ki .bose code files hain aur inhe track karein
+*.bose linguist-detectable=true
+*.bosem binary
+
+# Syntax highlighting ke liye (Rust ya custom mapper)
+*.bose linguist-language=Rust
